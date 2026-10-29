@@ -9,6 +9,9 @@ from .reminders import Reminders
 
 
 def build(settings, clock=None, provider=None):
+    from .runtime_config import RuntimeConfig
+
+    settings = RuntimeConfig(settings.database.parent).load(settings)
     clock = clock or SystemClock()
     db = Database(settings.database)
     identity = Identity(db, settings.timezone)

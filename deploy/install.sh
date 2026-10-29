@@ -5,6 +5,11 @@ if [[ $EUID -ne 0 ]]; then echo 'Jalankan dengan sudo bash deploy/install.sh'; e
 root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ "$root_dir" != /opt/elaine-v2 ]]; then echo 'Ekstrak proyek ke /opt/elaine-v2 dahulu.'; exit 1; fi
 cd "$root_dir"
+python3 - <<'PY'
+import ctypes.util
+if not ctypes.util.find_library("opus"):
+    raise SystemExit("Install dahulu: sudo apt install -y libopus0")
+PY
 if ! id discordbot >/dev/null 2>&1; then useradd --system --home-dir /opt/elaine-v2 --shell /usr/sbin/nologin discordbot; fi
 install -d -o discordbot -g discordbot -m 700 data
 if [[ ! -f .env ]]; then

@@ -1,13 +1,15 @@
-# Memasang Elaine v2 di VPS Ubuntu 24.04
+# Memasang Elaine v2.1 di VPS Ubuntu 24.04
+
+**Sudah memakai 2.0? Ikuti UPGRADE.md**, bukan ekstrak ulang ke bot aktif.
 
 Python 3.12; satu proses bot. Model dijalankan melalui API, bukan di VPS. Paket ini diuji lokal dengan database nyata dan API tiruan; koneksi Discord/provider dan VPS belum diuji. VPS 2 core/8 GB sesuai untuk instalasi kecil ini, tetapi kapasitas nyata bergantung pada jumlah pesan, latensi API, dan ukuran arsip.
 
 ## 1. Upload dari komputer Windows
 
-Simpan `elaine-v2.zip` di Downloads. Jalankan di **Command Prompt lokal Windows**, bukan terminal SSH Ubuntu:
+Simpan `elaine-v2.1.zip` di Downloads. Jalankan di **Command Prompt lokal Windows**, bukan terminal SSH Ubuntu:
 
 ```bat
-scp "%USERPROFILE%\Downloads\elaine-v2.zip" agentuser@100.95.193.63:/tmp/elaine-v2.zip
+scp "%USERPROFILE%\Downloads\elaine-v2.1.zip" agentuser@100.95.193.63:/tmp/elaine-v2.1.zip
 ssh agentuser@100.95.193.63
 ```
 
@@ -17,8 +19,9 @@ Alamat 100.95.193.63 harus bisa dijangkau dari komputer Anda (misalnya melalui j
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip unzip
-sudo unzip /tmp/elaine-v2.zip -d /opt
+sudo apt install -y python3-venv python3-pip unzip libopus0
+unzip /tmp/elaine-v2.1.zip -d /tmp
+sudo mv /tmp/elaine-v2.1 /opt/elaine-v2
 cd /opt/elaine-v2
 sudo bash deploy/install.sh
 sudo nano /opt/elaine-v2/.env
@@ -33,7 +36,7 @@ Gunakan direktori baru ini untuk instalasi pertama; jangan ekstrak menimpa insta
 - `DB_PATH=data/elaine_v2.sqlite3`: **jangan arahkan ke database v1**.
 - `DEFAULT_TIMEZONE=Asia/Jakarta` (WIB).
 
-Discord Developer Portal → aplikasi bot → Bot → aktifkan **Message Content Intent**. Invite bot dengan scope `bot` dan `applications.commands`. Izin channel: View Channel, Send Messages, Read Message History, Attach Files. Administrator tidak diperlukan.
+Discord Developer Portal → aplikasi bot → Bot → aktifkan **Message Content Intent**. Invite bot dengan scope `bot` dan `applications.commands`. Izin channel: View Channel, Send Messages, Read Message History, Attach Files, Embed Links, Add Reactions. Untuk voice: Connect dan Speak. Administrator tidak diperlukan.
 
 ```bash
 sudo -u discordbot .venv/bin/elaine check
@@ -99,7 +102,7 @@ sudo systemctl restart elaine.service
 sudo journalctl -u elaine.service -f
 ```
 
-Jika `PrivilegedIntentsRequired`, aktifkan Message Content Intent. Peringatan PyNaCl/voice boleh diabaikan untuk bot teks ini. Jika command tidak tampil, periksa scope aplikasi dan server yang dipilih. Jika HTTP API gagal, periksa kredensial/model/endpoint; `/uang` dan `/ingat` tetap independen dari AI setelah startup.
+Jika `PrivilegedIntentsRequired`, aktifkan Message Content Intent. Jika muncul peringatan PyNaCl/davey/Opus, dukungan suara belum lengkap; pasang dependency dari requirements.lock dan libopus0. Jika command tidak tampil, periksa scope aplikasi dan server yang dipilih. Jika HTTP API gagal, periksa kredensial/model/endpoint; `/uang` dan `/ingat` tetap independen dari AI setelah startup.
 
 ## 5. Backup dan update
 

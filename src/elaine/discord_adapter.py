@@ -10,10 +10,12 @@ from pydantic import ValidationError
 from .bootstrap import build
 from .commands import register_commands
 from .core import DomainError
-from .finance import describe_draft
+from . import presentation as ui
+from .runtime_config import RuntimeConfig
+from .voice import VoiceAlarms
+from .reactions import chat_text, ALLOWED_REACTIONS
 from .legacy import import_legacy
-from .reminders import display_time
-from .views import ActionButton, button_view
+from .views import ActionButton, button_view, draft_buttons
 
 LOG = logging.getLogger("elaine")
 
@@ -25,6 +27,10 @@ class ElaineClient(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.settings = settings
         self.app, self.db = build(settings)
+        self.settings = self.app.settings
+        self.runtime = RuntimeConfig(settings.database.parent)
+        self.voice = VoiceAlarms(self)
+        self.ai_admin_ids = set()
         self.tree = app_commands.CommandTree(self)
         register_commands(self)
         self.add_dynamic_items(ActionButton)
@@ -38,6 +44,18 @@ class ElaineClient(discord.Client):
 
     async def setup_hook(self):
         await self.db.check()
+        info = await self.application_info()
+        self.ai_admin_ids = {info.owner.id}
+        if info.team:
+            self.ai_admin_ids.add(info.team.owner_id)
+        configured = os.getenv("AI_CONFIG_ADMIN_IDS", "")
+        self.ai_admin_ids.update(int(x.strip()) for x in configured.split(",") if x.strip().isdigit())
+
+    async def require_ai_admin(self, interaction):
+        if not interaction.guild or interaction.user.id not in self.ai_admin_ids:
+            raise DomainError(
+                "Konfigurasi AI hanya untuk pemilik aplikasi bot atau AI_CONFIG_ADMIN_IDS dari VPS. Izin admin server saja tidak cukup."
+            )
 
     async def actor(self, interaction):
         if not interaction.guild or not interaction.channel:
@@ -57,8 +75,15 @@ class ElaineClient(discord.Client):
             raise DomainError("Gunakan text channel untuk pengingat.")
         perms = channel.permissions_for(channel.guild.me)
         send = perms.send_messages_in_threads if isinstance(channel, discord.Thread) else perms.send_messages
-        if not perms.view_channel or not send or not channel.permissions_for(member).view_channel:
-            raise DomainError("Bot atau pemilik pengingat tidak dapat mengakses/mengirim ke channel ini.")
+        if (
+            not perms.view_channel
+            or not send
+            or not perms.embed_links
+            or not channel.permissions_for(member).view_channel
+        ):
+            raise DomainError(
+                "Periksa izin View Channel, Send Messages, dan Embed Links untuk bot, serta akses pemilik."
+            )
 
     async def respond_error(self, interaction, error):
         if isinstance(error, DomainError):
@@ -67,12 +92,19 @@ class ElaineClient(discord.Client):
             message = "Input tidak valid. Periksa nominal, tanggal YYYY-MM-DD, jam HH:MM, atau jenis pilihan."
         else:
             LOG.error("Interaction failed: %s; interaction=%s", type(error).__name__, interaction.id)
-            message = "Operasi belum berhasil. Periksa status atau log aplikasi; jangan anggap data sudah tersimpan."
+            message = (
+                "Respons tidak dapat diselesaikan. Periksa /ingat detail atau /uang riwayat sebelum mengulang tindakan. Referensi: "
+                + str(interaction.id)
+            )
         try:
             if interaction.response.is_done():
-                await interaction.followup.send(message[:1900], ephemeral=True)
+                await interaction.followup.send(
+                    embed=ui.notice("Tidak dapat menyelesaikan permintaan", message, False), ephemeral=True
+                )
             else:
-                await interaction.response.send_message(message[:1900], ephemeral=True)
+                await interaction.response.send_message(
+                    embed=ui.notice("Tidak dapat menyelesaikan permintaan", message, False), ephemeral=True
+                )
         except discord.HTTPException:
             LOG.warning("Could not return interaction error: %s", interaction.id)
 
@@ -190,32 +222,39 @@ class ElaineClient(discord.Client):
                             actor, question, message.id, int(message.created_at.timestamp())
                         )
                     view = None
-                    text = result.text
+                    embed = None
                     if result.kind == "draft":
-                        text = describe_draft(result.data)
-                        view = button_view(
-                            "d", result.data["id"], result.data["version"], ["save", "edit", "cancel"]
-                        )
+                        embed, view = ui.draft_card(result.data), draft_buttons(result.data)
                     elif result.kind == "reminder":
+                        embed = ui.reminder_card(result.data)
                         view = button_view("r", result.data["id"], result.data["version"], ["edit", "cancel"])
-                    # Service receipts can contain user text. Escape mass mentions through AllowedMentions.
-                    chunks = [text[i : i + 1900] for i in range(0, min(len(text), 6000), 1900)] or [
-                        "Aku di sini."
-                    ]
-                    for index, chunk in enumerate(chunks):
-                        sent = await message.channel.send(
-                            chunk, view=view if index == len(chunks) - 1 else None
-                        )
-                        if not result.sensitive:
-                            await self.app.memory.record(
-                                actor,
-                                sent.id,
-                                self.user.id,
-                                "Elaine",
-                                sent.content,
-                                int(sent.created_at.timestamp()),
-                                "assistant",
-                            )
+                    elif result.kind == "report":
+                        embed = ui.report_card(result.data)
+                    elif result.kind == "transactions":
+                        embed = ui.transaction_list(result.data["rows"], 0, result.data.get("period"))
+                    elif result.kind == "reminders":
+                        embed = ui.reminder_list(result.data["rows"], 0)
+                    if embed:
+                        kwargs = {"view": view} if view is not None else {}
+                        await message.channel.send(embed=embed, **kwargs)
+                    else:
+                        text = chat_text(result.text) or "Aku di sini."
+                        chunks = [text[i : i + 1900] for i in range(0, min(len(text), 6000), 1900)]
+                        for chunk in chunks:
+                            sent = await message.channel.send(chunk)
+                            if not result.sensitive:
+                                await self.app.memory.record(
+                                    actor,
+                                    sent.id,
+                                    self.user.id,
+                                    "Elaine",
+                                    sent.content,
+                                    int(sent.created_at.timestamp()),
+                                    "assistant",
+                                )
+                    if result.reaction in ALLOWED_REACTIONS:
+                        with suppress(discord.HTTPException):
+                            await message.add_reaction(result.reaction)
                     # Summary failure must never hide a successful action receipt.
                     try:
                         candidate = await self.app.memory.summary_candidate(actor)
@@ -281,25 +320,50 @@ class ElaineClient(discord.Client):
             if not await self.app.reminders.still_valid(d["id"]):
                 return
             label = "Alarm" if reminder["mode"] == "alarm" else "Pengingat"
-            late = " (terlambat setelah layanan kembali aktif)" if occurrence["late"] else ""
-            content = (
-                f"<@{job['discord_user_id']}> **{label}{late}**\n{reminder['title']}\n"
-                f"Jadwal: {display_time(occurrence['effective_at'], reminder['timezone'])}\n"
-                f"ID `{reminder['id'][:8]}` · Notifikasi {occurrence['send_count'] + 1}/{reminder['max_sends']}"
-            )
+            shown = {**occurrence, "status": "notified", "send_count": occurrence["send_count"] + 1}
+            embed = ui.occurrence_card(shown, reminder, label + " · waktunya sekarang")
+            if occurrence["late"]:
+                ui.field(embed, "Keterlambatan", "Dikirim setelah layanan kembali aktif.", False)
+            if reminder.get("voice_channel_id"):
+                ui.field(embed, "Alarm suara", "Menyiapkan koneksi voice…", False)
             sent = await asyncio.wait_for(
                 channel.send(
-                    content,
+                    f"<@{job['discord_user_id']}>",
+                    embed=embed,
                     view=button_view(
                         "o", occurrence["id"], occurrence["revision"], ["ack", "snooze", "done", "manage"]
                     ),
                     allowed_mentions=discord.AllowedMentions(
-                        users=[discord.Object(id=int(job["discord_user_id"]))]
+                        everyone=False,
+                        roles=False,
+                        users=[discord.Object(id=int(job["discord_user_id"]))],
+                        replied_user=False,
                     ),
                 ),
                 60,
             )
             await self.app.reminders.delivered(d["id"], sent.id)
+            if reminder.get("voice_channel_id"):
+
+                async def report_voice(text):
+                    # Fetch current card so voice completion never overwrites a newer task status.
+                    current = await channel.fetch_message(sent.id)
+                    current_embed = current.embeds[0].copy() if current.embeds else embed.copy()
+                    for index, item in enumerate(current_embed.fields):
+                        if item.name == "Alarm suara":
+                            current_embed.set_field_at(
+                                index, name="Alarm suara", value=ui.clean(text), inline=False
+                            )
+                            break
+                    else:
+                        ui.field(current_embed, "Alarm suara", ui.clean(text), False)
+                    await current.edit(embed=current_embed)
+
+                if not self.voice.schedule(job, channel.guild, report_voice):
+                    with suppress(discord.HTTPException):
+                        await report_voice(
+                            "Ada alarm suara lain di server ini; notifikasi teks tetap dikirim."
+                        )
         except (discord.Forbidden, discord.NotFound, DomainError) as exc:
             await self.app.reminders.delivery_failed(d["id"], type(exc).__name__, permanent=True)
         except (discord.HTTPException, asyncio.TimeoutError) as exc:
@@ -311,6 +375,7 @@ class ElaineClient(discord.Client):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        await self.voice.close()
         await super().close()
         await self.app.provider.close()
         await self.db.close()

@@ -129,7 +129,17 @@ class Memory:
                 continue
             used += len(fact["content"]) + 100
             fact_texts.append({"kind": fact["kind"], "content": fact["content"]})
-        return {"messages": items, "memories": fact_texts}
+        import json
+
+        context = {"messages": items, "memories": fact_texts}
+        while len(json.dumps(context, ensure_ascii=False)) > budget:
+            if items:
+                items.pop(0)
+            elif fact_texts:
+                fact_texts.pop()
+            else:
+                break
+        return context
 
     async def remember(self, actor, fact, source_message):
         conversation = await self.identity.conversation(actor)

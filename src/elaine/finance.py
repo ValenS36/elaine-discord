@@ -45,6 +45,15 @@ class Finance:
                 kind = "finance.edit"
             return await new_action(s, actor, source, kind, payload, self.clock.now())
 
+    async def draft_delete(self, actor, txid, source):
+        async with self.db.write() as s:
+            ledger = await self.ledger(s, actor)
+            tx = await resolve_owned(s, transactions, txid, transactions.c.ledger_id, ledger["id"])
+            if tx["status"] == "deleted":
+                raise DomainError("Transaksi sudah dihapus dari riwayat.")
+            payload = {"id": tx["id"], "version": tx["version"], "transaction": tx}
+            return await new_action(s, actor, source, "finance.delete", payload, self.clock.now())
+
     async def get_draft(self, actor, action_id):
         async with self.db.read() as s:
             row = await resolve_owned(s, actions, action_id, actions.c.owner_id, actor.membership)
@@ -143,15 +152,21 @@ class Finance:
                     await s.execute(insert(transactions).values(**tx))
                     await audit(s, actor, action["id"], "transaction", tx["id"], "create", now, after=tx)
                     result["ids"].append(tx["id"])
-            elif action["kind"] in {"finance.edit", "finance.void"}:
+            elif action["kind"] in {"finance.edit", "finance.void", "finance.delete"}:
                 payload = action["payload"]
                 tx = await resolve_owned(
                     s, transactions, payload["id"], transactions.c.ledger_id, ledger["id"]
                 )
-                if tx["version"] != payload["version"] or tx["status"] != "posted":
+                if (
+                    tx["version"] != payload["version"]
+                    or tx["status"] == "deleted"
+                    or (action["kind"] != "finance.delete" and tx["status"] != "posted")
+                ):
                     raise DomainError("Transaksi sudah berubah. Buat draf koreksi baru.")
                 values = {"version": tx["version"] + 1}
-                if action["kind"] == "finance.void":
+                if action["kind"] == "finance.delete":
+                    values["status"] = "deleted"
+                elif action["kind"] == "finance.void":
                     values["status"] = "voided"
                 else:
                     item = MoneyItem.model_validate(payload["item"]).model_dump(mode="json")
@@ -248,7 +263,7 @@ class Finance:
             statement = (
                 select(transactions, categories.c.name.label("category"))
                 .join(categories, categories.c.id == transactions.c.category_id)
-                .where(transactions.c.ledger_id == ledger["id"])
+                .where(transactions.c.ledger_id == ledger["id"], transactions.c.status != "deleted")
             )
             if period:
                 start, end = self.bounds(period, ledger["timezone"], self.clock.now())

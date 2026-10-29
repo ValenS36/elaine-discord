@@ -38,6 +38,7 @@ class Result:
     kind: str = "chat"
     data: dict[str, Any] = field(default_factory=dict)
     sensitive: bool = False
+    reaction: str | None = None
 
 
 def rupiah(value: int) -> str:

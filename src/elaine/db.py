@@ -143,6 +143,7 @@ reminders = table(
     Column("weekdays", JSON, nullable=False),
     Column("next_due", Integer),
     Column("channel_id", String, nullable=False),
+    Column("voice_channel_id", String),
     Column("mode", String, nullable=False),
     Column("max_sends", Integer, nullable=False),
     Column("interval_seconds", Integer, nullable=False),
@@ -220,7 +221,7 @@ class Database:
     async def check(self):
         async with self.read() as session:
             version = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar()
-            if version != "0001":
+            if version != "0002":
                 raise RuntimeError("Versi database berbeda. Jalankan elaine migrate.")
 
     async def close(self):

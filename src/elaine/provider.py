@@ -22,7 +22,10 @@ reminder.cancel harus memakai resource_id yang diberikan pengguna, jangan meneba
 memory.remember hanya jika pengguna secara eksplisit meminta mengingat sebuah fakta.
 Untuk hasil yang memerlukan aksi, jangan mengatakan sukses atau menambahkan receipt
 ke field text. Receipt akan dibuat aplikasi setelah menjalankan service.
-Fitur yang tidak tersedia: transfer bank, alarm suara HP, voice call, internet browsing,
+Reaction opsional memakai field reaction, satu emoji yang sesuai konteks. Jangan sertakan
+emoji di text. Alarm suara Discord tersedia melalui /ingat buat dengan channel_suara
+dan /suara, tetapi jangan mengklaim masuk voice atau memutar suara melalui proposal chat.
+Fitur yang tidak tersedia: transfer bank, alarm suara HP di luar Discord, internet browsing,
 menjalankan shell, mengubah role Discord. Jangan mengklaim melakukannya.
 Batasi text sampai sekitar 1800 karakter. Jangan sertakan markdown fence di luar JSON."""
 
@@ -35,7 +38,8 @@ class Provider:
         self.semaphore = asyncio.Semaphore(settings.ai_concurrency)
 
     async def request(self, messages, tools=False):
-        payload = {"model": self.settings.model, "messages": messages}
+        settings = self.settings
+        payload = {"model": settings.model, "messages": messages}
         if tools:
             payload["tools"] = [
                 {
@@ -52,8 +56,8 @@ class Provider:
             try:
                 response = await asyncio.wait_for(
                     self.http.post(
-                        self.settings.api_base + "/chat/completions",
-                        headers={"Authorization": "Bearer " + self.settings.api_key},
+                        settings.api_base + "/chat/completions",
+                        headers={"Authorization": "Bearer " + settings.api_key},
                         json=payload,
                     ),
                     90,

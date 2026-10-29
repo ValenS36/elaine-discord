@@ -1,4 +1,4 @@
-# Tested runtime versions; Python 3.12
+# Tested runtime versions; Python 3.12; includes Discord voice extras
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.5
 aiosignal==1.4.0
@@ -8,7 +8,11 @@ annotated-types==0.8.0
 anyio==4.15.1
 attrs==26.1.0
 certifi==2026.10.23
+cffi==2.1.1
+cryptography==46.0.7
+davey==0.1.7
 discord.py==2.7.1
+emoji==2.16.0
 frozenlist==1.8.0
 greenlet==3.5.6
 h11==0.16.0
@@ -19,8 +23,10 @@ Mako==1.4.3
 MarkupSafe==3.0.4
 multidict==7.2.1
 propcache==0.5.4
+pycparser==3.12
 pydantic==2.14.1
 pydantic_core==2.50.1
+PyNaCl==1.5.0
 python-dotenv==1.2.4
 setuptools==84.2.1
 SQLAlchemy==2.1.6

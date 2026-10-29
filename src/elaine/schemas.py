@@ -53,6 +53,8 @@ class ReminderInput(StrictModel):
 
 
 class Proposal(StrictModel):
+    reaction: Literal["👍", "❤️", "🤔", "😌", "😤", "🎉", "👀", "✅"] | None = None
+
     kind: Literal[
         "chat",
         "clarify",

@@ -1,13 +1,27 @@
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from contextlib import suppress
 
 import discord
-
 from .core import DomainError
-from .finance import describe_draft
 from .schemas import MoneyItem, ReminderInput, parse_amount
-from .reminders import reminder_receipt
+from . import presentation as ui
+
+
+async def send_card(interaction, embed, view=None):
+    # Webhook.send rejects explicit view=None (unlike Message.edit).
+    if isinstance(view, PageView):
+        view.update_controls(embed)
+    kwargs = {"view": view} if view is not None else {}
+    return await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
+
+
+async def update_card(interaction, embed, view=None):
+    # A stale/deleted UI must not turn a committed action into a false failure.
+    if interaction.message:
+        with suppress(discord.HTTPException):
+            await interaction.message.edit(content=None, embed=embed, view=view)
 
 
 def button_view(kind, rid, version, verbs):
@@ -17,9 +31,27 @@ def button_view(kind, rid, version, verbs):
     return view
 
 
+def transaction_buttons(row):
+    verbs = (
+        ["edit", "delete"] if row["status"] == "posted" else (["delete"] if row["status"] == "voided" else [])
+    )
+    return button_view("t", row["id"], row["version"], verbs) if verbs else None
+
+
+def draft_buttons(row):
+    verbs = (
+        ["confirm_delete", "cancel"]
+        if row["kind"] == "finance.delete"
+        else ["save", "edit", "cancel"]
+        if row["kind"] == "finance.create"
+        else ["save", "cancel"]
+    )
+    return button_view("d", row["id"], row["version"], verbs)
+
+
 class ActionButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"el:(?P<kind>d|o|r):(?P<verb>save|edit|cancel|ack|done|snooze|manage):(?P<rid>[a-f0-9]{32}):(?P<version>[0-9]+)",
+    template=r"el:(?P<kind>d|o|r|t):(?P<verb>save|edit|cancel|ack|done|snooze|manage|delete|confirm_delete):(?P<rid>[a-f0-9]{32}):(?P<version>[0-9]+)",
 ):
     def __init__(self, kind, verb, rid, version):
         self.kind, self.verb, self.rid, self.version = kind, verb, rid, int(version)
@@ -31,8 +63,14 @@ class ActionButton(
             "done": "Selesai",
             "snooze": "Tunda 10 menit",
             "manage": "Kelola",
+            "delete": "Hapus",
+            "confirm_delete": "Hapus transaksi",
         }
-        style = discord.ButtonStyle.danger if verb == "cancel" else discord.ButtonStyle.secondary
+        style = (
+            discord.ButtonStyle.danger
+            if verb in {"cancel", "delete", "confirm_delete"}
+            else discord.ButtonStyle.secondary
+        )
         if verb in {"save", "done"}:
             style = discord.ButtonStyle.success
         super().__init__(
@@ -57,59 +95,79 @@ class ActionButton(
                 elif self.kind == "r":
                     row = await client.app.reminders.detail(actor, self.rid)
                     if row["version"] != self.version:
-                        raise DomainError("Jadwal sudah berubah. Buka /ingat daftar lagi.")
+                        raise DomainError("Jadwal berubah. Buka /ingat detail lagi.")
                     await interaction.response.send_modal(ReminderModal(row))
+                elif self.kind == "t":
+                    row = await client.app.finance.detail(actor, self.rid)
+                    if row["version"] != self.version or row["status"] != "posted":
+                        raise DomainError("Transaksi berubah. Buka /uang detail lagi.")
+                    await interaction.response.send_modal(MoneyModal(row["kind"], row["occurred_on"], row))
                 return
             await interaction.response.defer(ephemeral=True)
             if self.kind == "d":
-                if self.verb == "save":
+                if self.verb in {"save", "confirm_delete"}:
                     result = await client.app.finance.confirm(actor, self.rid, self.version)
-                    await interaction.followup.send(
-                        "Tersimpan. ID transaksi: " + ", ".join(x[:8] for x in result["ids"]), ephemeral=True
-                    )
+                    embed = await ui.finance_receipt(client.app.finance, actor, result)
+                    row = await client.app.finance.detail(actor, result["ids"][0])
+                    view = transaction_buttons(row) if len(result["ids"]) == 1 else None
                 elif self.verb == "cancel":
                     await client.app.finance.cancel_draft(actor, self.rid, self.version)
-                    await interaction.followup.send("Draf dibatalkan.", ephemeral=True)
+                    embed, view = ui.notice("Draf dibatalkan", "Tidak ada perubahan transaksi."), None
+                else:
+                    raise DomainError("Tombol tidak sesuai jenis tindakan.")
+                await send_card(interaction, embed, view)
+                await update_card(interaction, embed, view)
+            elif self.kind == "t" and self.verb == "delete":
+                tx = await client.app.finance.detail(actor, self.rid)
+                if tx["version"] != self.version:
+                    raise DomainError("Transaksi berubah. Buka /uang detail lagi.")
+                row = await client.app.finance.draft_delete(actor, self.rid, f"interaction:{interaction.id}")
+                await send_card(interaction, ui.draft_card(row), draft_buttons(row))
             elif self.kind == "o":
                 if self.verb == "manage":
                     from .db import occurrences, reminders, one
                     from sqlalchemy import select
 
-                    async with client.db.read() as s:
+                    async with client.db.read() as session:
                         row = await one(
-                            s,
+                            session,
                             select(reminders)
                             .join(occurrences)
                             .where(occurrences.c.id == self.rid, reminders.c.owner_id == actor.membership),
                         )
                     if not row:
                         raise DomainError("Pengingat bukan milikmu.")
-                    await interaction.followup.send(
-                        f"Pengingat `{row['id'][:8]}` · {row['title']} · {row['status']}",
-                        view=button_view("r", row["id"], row["version"], ["edit", "cancel"]),
-                        ephemeral=True,
+                    await send_card(
+                        interaction,
+                        ui.reminder_card(row, "Detail pengingat"),
+                        button_view("r", row["id"], row["version"], ["edit", "cancel"]),
                     )
                 else:
                     row = await client.app.reminders.occurrence_action(
                         actor, self.rid, self.verb, self.version
                     )
-                    labels = {
-                        "ack": "Pengingat diakui. Alarm untuk kejadian ini berhenti.",
-                        "done": "Ditandai selesai.",
-                        "snooze": "Ditunda 10 menit.",
-                    }
-                    view = (
-                        button_view("o", row["id"], row["revision"], ["done", "manage"])
-                        if self.verb == "ack"
-                        else None
+                    await client.voice.stop_occurrence(row["id"])
+                    reminder = await client.app.reminders.detail(actor, row["reminder_id"])
+                    embed = ui.occurrence_card(row, reminder)
+                    verbs = (
+                        ["done", "snooze", "manage"]
+                        if row["status"] == "acknowledged"
+                        else ["done", "manage"]
+                        if row["status"] == "scheduled"
+                        else []
                     )
-                    await interaction.followup.send(labels[self.verb], view=view, ephemeral=True)
+                    view = button_view("o", row["id"], row["revision"], verbs) if verbs else None
+                    await send_card(interaction, embed, view)
+                    await update_card(interaction, embed, view)
             elif self.kind == "r" and self.verb == "cancel":
                 row = await client.app.reminders.detail(actor, self.rid)
                 if row["version"] != self.version:
-                    raise DomainError("Jadwal sudah berubah. Buka /ingat daftar lagi.")
-                await client.app.reminders.cancel(actor, self.rid, f"interaction:{interaction.id}")
-                await interaction.followup.send("Seluruh seri pengingat dibatalkan.", ephemeral=True)
+                    raise DomainError("Jadwal berubah. Buka /ingat detail lagi.")
+                row = await client.app.reminders.cancel(actor, self.rid, f"interaction:{interaction.id}")
+                await client.voice.stop_reminder(row["id"])
+                embed = ui.reminder_card(row, "Pengingat dibatalkan")
+                await send_card(interaction, embed)
+                await update_card(interaction, embed)
         except Exception as exc:
             await client.respond_error(interaction, exc)
 
@@ -162,16 +220,15 @@ class MoneyModal(SafeModal):
             row = await client.app.finance.draft_change(
                 actor, self.transaction["id"], source, item.model_dump(mode="json")
             )
-            await interaction.followup.send(
-                describe_draft(row),
-                view=button_view("d", row["id"], row["version"], ["save", "cancel"]),
-                ephemeral=True,
-            )
+            await send_card(interaction, ui.draft_card(row), draft_buttons(row))
         else:
             row = await client.app.finance.draft(actor, [item.model_dump(mode="json")], source)
             result = await client.app.finance.confirm(actor, row["id"], row["version"])
-            await interaction.followup.send(
-                "Transaksi tersimpan. ID: " + result["ids"][0][:8], ephemeral=True
+            tx = await client.app.finance.detail(actor, result["ids"][0])
+            await send_card(
+                interaction,
+                await ui.finance_receipt(client.app.finance, actor, result),
+                transaction_buttons(tx),
             )
 
 
@@ -217,11 +274,7 @@ class DraftEditModal(SafeModal):
             note="" if self.note.value == "-" else (self.note.value or original["note"]),
         ).model_dump(mode="json")
         row = await client.app.finance.change_draft(actor, self.row["id"], self.row["version"], items)
-        await interaction.followup.send(
-            describe_draft(row),
-            view=button_view("d", row["id"], row["version"], ["save", "edit", "cancel"]),
-            ephemeral=True,
-        )
+        await send_card(interaction, ui.draft_card(row), draft_buttons(row))
 
 
 class ReminderModal(SafeModal):
@@ -270,10 +323,12 @@ class ReminderModal(SafeModal):
         else:
             await client.check_send_permission(interaction.channel, interaction.user)
             row = await client.app.reminders.create(actor, raw, f"interaction:{interaction.id}")
-        await interaction.followup.send(
-            reminder_receipt(row),
-            view=button_view("r", row["id"], row["version"], ["edit", "cancel"]),
-            ephemeral=True,
+        if self.row:
+            await client.voice.stop_reminder(row["id"])
+        await send_card(
+            interaction,
+            ui.reminder_card(row),
+            button_view("r", row["id"], row["version"], ["edit", "cancel"]),
         )
 
 
@@ -281,6 +336,11 @@ class PageView(discord.ui.View):
     def __init__(self, owner_id, page, callback):
         super().__init__(timeout=300)
         self.owner_id, self.page, self.callback = owner_id, page, callback
+        self.previous.disabled = page == 0
+
+    def update_controls(self, embed):
+        self.previous.disabled = self.page == 0
+        self.next.disabled = len(embed.fields) < ui.PAGE_SIZE
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -291,9 +351,11 @@ class PageView(discord.ui.View):
     async def turn(self, interaction, delta):
         try:
             await interaction.response.defer(ephemeral=True)
-            self.page = max(0, self.page + delta)
-            content = await self.callback(interaction, self.page)
-            await interaction.edit_original_response(content=content, view=self)
+            new_page = max(0, self.page + delta)
+            content = await self.callback(interaction, new_page)
+            self.page = new_page
+            self.update_controls(content)
+            await interaction.edit_original_response(content=None, embed=content, view=self)
         except Exception as exc:
             await interaction.client.respond_error(interaction, exc)
 
@@ -304,3 +366,53 @@ class PageView(discord.ui.View):
     @discord.ui.button(label="Berikutnya")
     async def next(self, interaction, button):
         await self.turn(interaction, 1)
+
+
+class AISettingsModal(SafeModal):
+    def __init__(self, client):
+        super().__init__(title="Konfigurasi AI Elaine", timeout=600)
+        cfg = client.app.provider.settings
+        self.version = client.runtime.version
+        self.model = discord.ui.TextInput(label="ID model AI", default=cfg.model, max_length=200)
+        self.base = discord.ui.TextInput(
+            label="Base URL HTTPS (kompatibel OpenAI)", default=cfg.api_base, max_length=250
+        )
+        self.key = discord.ui.TextInput(
+            label="API key baru; kosong = pertahankan", required=False, max_length=2000
+        )
+        self.context = discord.ui.TextInput(
+            label="Context arsip (karakter, 4000–60000)", default=str(cfg.context_chars), max_length=5
+        )
+        self.mode = discord.ui.TextInput(label="Mode API: json atau tools", default=cfg.ai_mode, max_length=5)
+        for item in (self.model, self.base, self.key, self.context, self.mode):
+            self.add_item(item)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        client = interaction.client
+        await client.require_ai_admin(interaction)
+        from .runtime_config import validate_public_dns
+
+        async with client.runtime.lock:
+            if self.version != client.runtime.version:
+                raise DomainError("Konfigurasi berubah sejak formulir dibuka. Buka /admin ai lagi.")
+            settings = client.runtime.candidate(
+                client.app.provider.settings,
+                self.model.value,
+                self.base.value,
+                self.key.value,
+                int(self.context.value),
+                self.mode.value,
+            )
+            await validate_public_dns(settings.api_base)
+            client.runtime.save(settings)
+            client.app.provider.settings = settings
+            client.app.settings = settings
+            client.settings = settings
+        await send_card(
+            interaction,
+            ui.notice(
+                "Konfigurasi AI disimpan",
+                "Berlaku untuk permintaan berikutnya dan tetap tersimpan setelah restart. Jalankan /admin ai_tes untuk memeriksa koneksi. API key tidak ditampilkan kembali.",
+            ),
+        )

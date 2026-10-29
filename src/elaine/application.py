@@ -18,11 +18,13 @@ class Application:
     settings: object
 
     async def chat(self, actor, text, message_id, received_at):
-        context = await self.memory.context(actor, text, message_id, self.settings.context_chars)
+        context = await self.memory.context(actor, text, message_id, self.provider.settings.context_chars)
         p = await self.provider.propose(actor, text, context, received_at)
         source = "message:" + str(message_id)
         if p.kind in {"chat", "clarify"}:
-            return Result(p.text or "Aku di sini. Apa yang ingin kamu bahas?")
+            from .reactions import chat_text
+
+            return Result(chat_text(p.text) or "Aku di sini. Apa yang ingin kamu bahas?", reaction=p.reaction)
         if p.kind == "reminder.create":
             if not re.search(r"ingatkan|pengingat|alarm|jadwalkan|remind", text, re.I):
                 return Result("Kamu ingin membuat pengingat? Sebutkan tugas, tanggal, dan jamnya.")
@@ -44,7 +46,7 @@ class Application:
                     "private_hint",
                 )
                 if not actor.private
-                else Result(format_reminders(rows))
+                else Result("", "reminders", {"rows": rows})
             )
         if p.kind == "reminder.cancel":
             if not re.search(r"batal|hapus|cancel", text, re.I) or p.resource_id not in text:
@@ -66,8 +68,13 @@ class Application:
             if not actor.private:
                 return Result("Gunakan /uang ringkasan atau /uang riwayat. Hasilnya hanya terlihat olehmu.")
             if p.kind == "finance.report":
-                return Result(format_report(await self.finance.report(actor, p.period)), sensitive=True)
-            return Result(format_transactions(await self.finance.history(actor, p.period)), sensitive=True)
+                return Result("", "report", await self.finance.report(actor, p.period), True)
+            return Result(
+                "",
+                "transactions",
+                {"rows": await self.finance.history(actor, p.period, limit=5), "period": p.period},
+                True,
+            )
         if p.kind == "memory.remember":
             if not re.search(r"ingat bahwa|ingat kalau|ingat ya|ingat ini|simpan fakta", text, re.I):
                 return Result("Untuk menyimpan fakta khusus, tulis ‘ingat bahwa ...’.")

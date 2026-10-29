@@ -72,12 +72,14 @@ class Reminders:
             raise DomainError("Hari tanggal pertama harus termasuk hari pengulangan.")
         return item, due, days
 
-    async def create(self, actor, raw, source):
+    async def create(self, actor, raw, source, voice_channel_id=None):
         async with self.db.write() as s:
             action = await new_action(s, actor, source, "reminder.create", raw, self.clock.now())
             if action["status"] == "succeeded":
                 return action["result"]
             item, due, days = self.normalize(actor, raw)
+            if voice_channel_id and item.mode != "alarm":
+                raise DomainError("Alarm suara membutuhkan jenis alarm.")
             row = dict(
                 id=uid(),
                 owner_id=actor.membership,
@@ -89,6 +91,7 @@ class Reminders:
                 weekdays=days,
                 next_due=due,
                 channel_id=actor.channel,
+                voice_channel_id=str(voice_channel_id) if voice_channel_id else None,
                 mode=item.mode,
                 max_sends=self.alarm_max if item.mode == "alarm" else 1,
                 interval_seconds=self.alarm_interval,
@@ -132,20 +135,35 @@ class Reminders:
         await s.execute(insert(occurrences).values(**row))
         return row
 
-    async def list(self, actor, page=0):
+    async def _with_latest(self, session, row):
+        row = dict(row)
+        row["last_occurrence"] = await one(
+            session,
+            select(occurrences)
+            .where(occurrences.c.reminder_id == row["id"], occurrences.c.series_version == row["version"])
+            .order_by(occurrences.c.scheduled_at.desc())
+            .limit(1),
+        )
+        if row["last_occurrence"]:
+            row["last_occurrence"] = dict(row["last_occurrence"])
+        return row
+
+    async def list(self, actor, page=0, limit=5):
         async with self.db.read() as s:
-            return await all_rows(
+            rows = await all_rows(
                 s,
                 select(reminders)
                 .where(reminders.c.owner_id == actor.membership)
                 .order_by(reminders.c.created_at.desc(), reminders.c.id)
-                .offset(max(0, page) * 10)
-                .limit(10),
+                .offset(max(0, page) * limit)
+                .limit(limit),
             )
+            return [await self._with_latest(s, row) for row in rows]
 
     async def detail(self, actor, prefix):
         async with self.db.read() as s:
-            return await resolve_owned(s, reminders, prefix, reminders.c.owner_id, actor.membership)
+            row = await resolve_owned(s, reminders, prefix, reminders.c.owner_id, actor.membership)
+            return await self._with_latest(s, row)
 
     async def cancel(self, actor, prefix, source):
         async with self.db.write() as s:
@@ -201,6 +219,7 @@ class Reminders:
                 max_sends=self.alarm_max if item.mode == "alarm" else 1,
                 interval_seconds=self.alarm_interval,
                 status="active",
+                voice_channel_id=row.get("voice_channel_id") if item.mode == "alarm" else None,
                 version=row["version"] + 1,
             )
             # Keep original destination; UI cannot silently move reminders to another channel.
@@ -226,7 +245,7 @@ class Reminders:
     async def _cancel_pending(self, s, reminder_id):
         ids = select(occurrences.c.id).where(
             occurrences.c.reminder_id == reminder_id,
-            occurrences.c.status.in_(["scheduled", "notified", "failed"]),
+            occurrences.c.status.in_(["scheduled", "notified", "acknowledged", "failed"]),
         )
         await s.execute(
             update(deliveries)
@@ -252,9 +271,11 @@ class Reminders:
             if not occurrence:
                 raise DomainError("Pengingat tidak ditemukan atau bukan milikmu.")
             occurrence = dict(occurrence)
-            if occurrence["status"] == "completed" or (
-                verb == "ack" and occurrence["status"] == "acknowledged"
-            ):
+            if occurrence["status"] == "completed":
+                if verb == "done":
+                    return occurrence
+                raise DomainError("Tugas sudah selesai. Buat pengingat baru untuk menjadwalkan lagi.")
+            if verb == "ack" and occurrence["status"] == "acknowledged":
                 return occurrence
             if occurrence["revision"] != revision or occurrence["status"] not in {
                 "scheduled",
@@ -262,8 +283,6 @@ class Reminders:
                 "acknowledged",
             }:
                 raise DomainError("Tombol sudah kedaluwarsa. Gunakan /ingat daftar untuk status terbaru.")
-            if occurrence["status"] == "acknowledged" and verb == "snooze":
-                raise DomainError("Alarm sudah diakui. Buat pengingat baru untuk menunda lagi.")
             now = self.clock.now()
             values = {"revision": revision + 1, "next_fire": None}
             if verb == "snooze":
@@ -272,6 +291,7 @@ class Reminders:
                     effective_at=now + minutes * 60,
                     next_fire=now + minutes * 60,
                     send_count=0,
+                    acknowledged_at=None,
                 )
             else:
                 values.update(status="completed" if verb == "done" else "acknowledged", acknowledged_at=now)
@@ -287,9 +307,14 @@ class Reminders:
             )
             await s.execute(update(occurrences).where(occurrences.c.id == occurrence_id).values(**values))
             reminder = await one(s, select(reminders).where(reminders.c.id == occurrence["reminder_id"]))
-            if verb != "snooze" and reminder["recurrence"] == "none":
+            if reminder["recurrence"] == "none":
                 await s.execute(
-                    update(reminders).where(reminders.c.id == reminder["id"]).values(status="completed")
+                    update(reminders)
+                    .where(reminders.c.id == reminder["id"])
+                    .values(
+                        status={"done": "completed", "ack": "acknowledged", "snooze": "active"}[verb],
+                        next_due=None,
+                    )
                 )
             await audit(
                 s,
@@ -446,6 +471,22 @@ class Reminders:
                 "reminder": dict(reminder),
                 "discord_user_id": owner["discord_id"],
             }
+
+    async def occurrence_valid(self, occurrence_id, revision):
+        async with self.db.read() as s:
+            return bool(
+                await one(
+                    s,
+                    select(occurrences.c.id)
+                    .select_from(occurrences.join(reminders, occurrences.c.reminder_id == reminders.c.id))
+                    .where(
+                        occurrences.c.id == occurrence_id,
+                        occurrences.c.revision == revision,
+                        occurrences.c.status.in_(["scheduled", "notified"]),
+                        reminders.c.status == "active",
+                    ),
+                )
+            )
 
     async def still_valid(self, delivery_id):
         async with self.db.read() as s:

@@ -1,13 +1,13 @@
-# Elaine v2
+# Elaine v2.1
 
-Asisten Discord berbahasa Indonesia: teman percakapan dengan personality tetap, arsip percakapan, pengingat/alarm teks, dan pencatatan keuangan pribadi. Mulai pemasangan dari **DEPLOY.md**.
+Asisten Discord berbahasa Indonesia: teman percakapan dengan personality tetap, arsip percakapan, pengingat/alarm teks, dan pencatatan keuangan pribadi. Instalasi baru: **DEPLOY.md**. Upgrade dari 2.0: **UPGRADE.md**. Perubahan: **CHANGELOG.md**.
 
 ## Fitur yang tersedia
 
 - **Elaine ekspresif secara default.** Nada tenang, hangat, humor kering, bisa menegur saat konteksnya cocok dan menggunakan gestur singkat. Tidak ada command pengaturan gaya. Gestur merupakan ekspresi teks/roleplay, bukan tindakan fisik. Persona ada di `prompts/elaine.md`.
 - **Ingatan per channel.** Arsip SQLite persisten, maksimal 40 pesan terbaru serta hingga 12 kecocokan kata dari arsip lama, fakta yang diminta pengguna, dan ringkasan berkala dengan tautan sumber internal. Konteks dibatasi karakter; bot tidak mengingat semua arsip sekaligus. Edit/hapus pesan yang teramati menonaktifkan ingatan turunannya. Riwayat awal yang diambil saat startup dibatasi `HISTORY_SYNC_LIMIT`.
-- **Pengingat.** Sekali, harian, mingguan; timezone profil, tombol diterima/selesai/tunda 10 menit, ubah/batal seri, serta daftar pribadi. Alarm mengirim maksimal 3 notifikasi berjarak 5 menit secara default, berhenti jika diakui. Pengingat tetap tersimpan setelah restart.
-- **Keuangan IDR pribadi.** Pemasukan/pengeluaran, kategori, tanggal, catatan, rekap harian/bulanan, pagination, CSV, koreksi dan pembatalan dengan audit. Nominal integer, total dihitung SQL. Arus bersih bukan saldo rekening bank.
+- **Pengingat.** Sekali, harian, mingguan; timezone profil, tombol diterima/selesai/tunda 10 menit, ubah/batal seri, serta daftar pribadi. Alarm bisa disertai suara di voice channel pilihan (30 detik per kiriman, pemilik hadir). Alarm mengirim maksimal 3 notifikasi berjarak 5 menit secara default, berhenti jika diakui. Pengingat tetap tersimpan setelah restart.
+- **Keuangan IDR pribadi.** Pemasukan/pengeluaran, kategori, tanggal, catatan, rekap harian/bulanan, pagination, CSV, koreksi, pembatalan, dan penghapusan dari riwayat dengan audit. Nominal integer, total dihitung SQL. Arus bersih bukan saldo rekening bank.
 - **Percakapan alami dan slash command.** Chat mengusulkan tindakan terstruktur; service memvalidasi identitas/argumen. Chat keuangan membuat draf dulu. Form `/uang tambah` menyimpan saat pengguna Submit. Command terstruktur tidak bergantung pada AI.
 
 ## Contoh penggunaan
@@ -24,10 +24,11 @@ Tanggal/jam yang belum jelas akan ditanyakan kembali. Penerjemahan bahasa alami 
 
 | Kelompok | Command |
 |---|---|
-| Elaine | `/elaine bantuan`, `/elaine profil`, `/elaine ingatan`, `/elaine lupakan` |
+| Elaine | `/elaine bantuan`, `/elaine profil`, `/elaine preferensi`, `/elaine ingatan`, `/elaine lupakan` |
 | Pengingat | `/ingat buat`, `/ingat daftar`, `/ingat detail`, `/ingat ubah`, `/ingat batal` |
-| Keuangan | `/uang tambah`, `/uang draf`, `/uang ringkasan`, `/uang riwayat`, `/uang detail`, `/uang ubah`, `/uang batal`, `/uang ekspor` |
-| Admin | `/admin channel`, `/admin status` |
+| Keuangan | `/uang tambah`, `/uang draf`, `/uang ringkasan`, `/uang riwayat`, `/uang detail`, `/uang ubah`, `/uang batal`, `/uang hapus`, `/uang ekspor` |
+| Admin | `/admin channel`, `/admin status`, `/admin ai`, `/admin ai_tes` |
+| Suara | `/suara gabung`, `/suara tes`, `/suara keluar` |
 | Menu pesan | Klik kanan pesan → Apps → Buat pengingat |
 
 Periode keuangan `2026-10` untuk bulanan atau `2026-10-28` untuk harian. Jenis transaksi `income`/`expense`; jadwal `reminder`/`alarm`; pengulangan `none`/`daily`/`weekly`. Hari mingguan 0=Senin sampai 6=Minggu. ID singkat dari daftar bisa dipakai untuk detail/ubah/batal. Timezone profil mengatur jadwal baru; jadwal lama mempertahankan timezone saat dibuat. Ledger mempertahankan timezone ketika pertama dibuat.
@@ -61,8 +62,9 @@ flowchart TD
 |---|---|
 | `discord_adapter.py`, `commands.py`, `views.py` | Event Discord, command, modal, tombol, izin channel |
 | `application.py` | Routing usulan AI ke domain dan receipt hasil |
-| `provider.py`, `schemas.py`, `prompts/elaine.md` | Adapter API kompatibel, validasi payload, personality tetap |
+| `provider.py`, `schemas.py`, `runtime_config.py`, `prompts/elaine.md` | Adapter API kompatibel, validasi payload, personality tetap |
 | `identity.py` | Workspace, pengguna, keanggotaan, timezone, binding channel |
+| `presentation.py`, `voice.py`, `reactions.py` | Kartu embed, alarm suara, dan pemisahan reaksi dari teks |
 | `memory.py` | Arsip, pengambilan konteks, fakta, ringkasan dan sumber |
 | `finance.py`, `actions.py` | Ledger, draf, idempotensi, rekap, audit |
 | `reminders.py` | Jadwal, occurrence, ack/snooze, outbox, retry |
@@ -115,7 +117,7 @@ Scheduler menyimpan occurrence dan outbox terlebih dahulu. Worker mengklaim deli
 
 ## Batasan yang perlu dipahami
 
-- Alarm berupa notifikasi Discord, bukan alarm suara perangkat atau voice call. Pengiriman membutuhkan VPS dan koneksi Discord aktif; notifikasi perangkat bergantung pada pengaturan Discord.
+- Alarm berupa notifikasi Discord dan suara opsional di voice channel, bukan alarm perangkat di luar Discord. Pengiriman membutuhkan VPS dan koneksi Discord aktif; notifikasi perangkat bergantung pada pengaturan Discord.
 - Pengiriman eksternal tidak menjamin exactly-once: crash setelah Discord menerima pesan tetapi sebelum receipt database tersimpan dapat menghasilkan duplikat. Pembatalan yang berbarengan dengan request kirim yang sudah berjalan juga mungkin terlambat untuk menarik pesan itu.
 - Satu proses aktif per database. SQLite cocok untuk beban awal; bukan arsitektur multi-instance. Arsip tumbuh dan perlu dipantau/back up. Belum ada pruning otomatis, vector database, atau full-text index; pencarian arsip memakai kecocokan kata.
 - Hapus/edit yang terjadi ketika bot offline di luar jangkauan sinkronisasi startup mungkin belum direkonsiliasi. `/elaine lupakan` menghapus fakta khusus, bukan semua pesan sumber dari arsip atau Discord.
@@ -137,3 +139,7 @@ python3 -m venv .venv
 ```
 
 Lihat `TESTING.md` untuk hasil verifikasi dan pemeriksaan live yang masih diperlukan.
+
+## Konfigurasi dan tampilan 2.1
+
+Profil Elaine kini terpisah dari preferensi pengguna. UI menggunakan kartu embed native Discord, lima item per halaman, warna status dan tombol. Hapus transaksi memerlukan konfirmasi dan mempertahankan audit internal. Model/endpoint/key/context dapat diubah melalui /admin ai oleh pemilik aplikasi, tersimpan terenkripsi dan bertahan setelah restart. Lihat UPGRADE.md untuk izin, backup key, batas context dan uji voice.
