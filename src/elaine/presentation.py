@@ -282,11 +282,14 @@ def profile_card(user, zone):
 
 
 def status_card(settings, worker, voice_ok):
+    from .rate_limit import AI_REQUESTS_PER_MINUTE
+
     e = card("Status Elaine", "Versi 2.1.0 • Personality bawaan")
     field(e, "Database", "Terhubung · schema 0002")
     field(e, "Scheduler", "Aktif" if worker else "Tidak aktif")
     field(e, "Alarm suara", "Siap" if voice_ok else "Dependency suara belum lengkap")
     field(e, "Model AI", clean(settings.model, 200), False)
+    field(e, "Batas request AI", f"{AI_REQUESTS_PER_MINUTE} request / 60 detik · global", False)
     field(e, "Context arsip", f"{settings.context_chars:,} karakter maksimum".replace(",", "."), False)
     field(
         e,

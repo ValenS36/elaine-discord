@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from .core import DomainError
 from .schemas import Proposal
+from .rate_limit import AIRateLimiter
 
 
 PROTOCOL = """Kembalikan satu objek JSON yang cocok dengan schema yang diberikan.
@@ -36,6 +37,7 @@ class Provider:
         self.persona = (settings.root / "prompts/elaine.md").read_text()
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10), transport=transport)
         self.semaphore = asyncio.Semaphore(settings.ai_concurrency)
+        self.rate_limiter = AIRateLimiter()
 
     async def request(self, messages, tools=False):
         settings = self.settings
@@ -53,6 +55,9 @@ class Provider:
             ]
             payload["tool_choice"] = {"type": "function", "function": {"name": "elaine_response"}}
         async with self.semaphore:
+            # Count every HTTP attempt, including failed requests and schema retries.
+            # Queue time is separate from the HTTP timeout.
+            await self.rate_limiter.acquire()
             try:
                 response = await asyncio.wait_for(
                     self.http.post(
